@@ -1,0 +1,27 @@
+# 环境变量 & 密钥
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# 数据文件（索引文件较大，不入库）
+data/kb/index.faiss
+data/kb/chunks.json
+data/reports/*
+!data/reports/.gitkeep
+
+# 系统文件
+.DS_Store
+Thumbs.db
