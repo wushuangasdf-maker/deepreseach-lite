@@ -17,10 +17,21 @@ DeepResearch-Lite 命令行入口。
     --quiet        静默模式，只输出最终报告路径
 """
 import argparse
+import logging
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agent.agents import deep_research
+from core.logging_setup import setup_logging, collect_error_summary
+
+logger = logging.getLogger(__name__)
+
+
+def _print_error_summary() -> None:
+    """运行结束时，若有收集到的错误则汇总打印到 stderr。"""
+    summary = collect_error_summary()
+    if summary:
+        print(f"\n{'=' * 60}\n{summary}\n{'=' * 60}", file=sys.stderr)
 # ── 研究深度 → Agent 参数映射 ───────────────────────
 
 # 不同深度对应不同的 max_turns 和 force_report_at
@@ -57,6 +68,9 @@ def main():
     4. 调用 deep_research()
     5. 输出结果（报告路径或错误信息）
     """
+    # ── 日志配置（错误统一走 logging 并落盘汇总）──
+    setup_logging()
+
     # ── 参数解析 ─────────────────────────
     parser = argparse.ArgumentParser(
         description="DeepResearch-Lite 命令行入口",
@@ -87,11 +101,13 @@ def main():
     question = args.question.strip()
 
     if not question:
-        print("❌ 错误：研究主题不能为空。", file=sys.stderr)
+        logger.error("研究主题不能为空。")
+        _print_error_summary()
         sys.exit(1)
 
     if len(question) < 4:
-        print("❌ 错误：研究主题太短（至少 4 个字符）。", file=sys.stderr)
+        logger.error("研究主题太短（至少 4 个字符）。")
+        _print_error_summary()
         sys.exit(1)
      # ── 获取深度配置 ──────────────────────────────────────
     config = DEPTH_CONFIG[args.depth]
@@ -114,19 +130,24 @@ def main():
             verbose=verbose,
         )
     except KeyboardInterrupt:
-        print("\n\n⚠️  用户中断。已搜索的信息已丢失。", file=sys.stderr)
+        logger.warning("用户中断，已搜索的信息已丢失。")
+        _print_error_summary()
         sys.exit(130)  # 128 + SIGINT(2) = 130，Unix 约定
     except Exception as e:
-        print(f"\n❌ 研究过程出错：{type(e).__name__}: {e}", file=sys.stderr)
-
         # 针对常见错误给出具体建议
+        hint = ""
         if "Connection" in str(e) or "Timeout" in str(e):
-            print("   提示：检查网络连接和 API 服务状态。", file=sys.stderr)
+            hint = "检查网络连接和 API 服务状态。"
         elif "API key" in str(e).lower() or "401" in str(e) or "403" in str(e):
-            print("   提示：检查 .env 文件中的 API Key 是否正确。", file=sys.stderr)
+            hint = "检查 .env 文件中的 API Key 是否正确。"
         elif "quota" in str(e).lower() or "429" in str(e):
-            print("   提示：API 配额可能已用完，请检查账户余额。", file=sys.stderr)
+            hint = "API 配额可能已用完，请检查账户余额。"
 
+        logger.error(
+            "研究过程出错：%s: %s%s",
+            type(e).__name__, e, f"（提示：{hint}）" if hint else "",
+        )
+        _print_error_summary()
         sys.exit(1)
 
     # ── 输出最终结果 ──────────────────────────────────────
@@ -134,6 +155,9 @@ def main():
         print(f"\n{'=' * 60}")
         print(f"  {result}")
         print(f"{'=' * 60}\n")
+
+    # ── 错误汇总（若有）──────────────────────────────────
+    _print_error_summary()
 
 
 if __name__ == "__main__":

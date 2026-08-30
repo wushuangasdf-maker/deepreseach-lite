@@ -1,0 +1,16 @@
+# ============================================================
+# DeepResearch-Lite 测试依赖清单（开发/测试环境专用）
+# 版本号取自项目本地 .venv 实际安装的版本（Python 3.11）
+# 安装：pip install -r requirements-dev.txt
+# 说明：运行时不需要这些包，仅用于本地跑 pytest。
+#       运行依赖见 requirements.txt。
+# ============================================================
+
+# ---- 测试框架 ----
+pytest==9.1.1       # 测试框架本体，自动发现并运行 test_*.py / *_test.py
+
+# ---- 覆盖率 ----
+pytest-cov==7.1.0   # 生成覆盖率报告（pytest --cov），附带 coverage 库
+
+# ---- Mock 支持 ----
+pytest-mock==3.15.1 # 提供 mocker fixture，封装 unittest.mock，方便模拟外部调用

@@ -1,0 +1,27 @@
+# ============================================================
+# DeepResearch-Lite 项目依赖清单
+# 版本号取自项目本地 .venv 实际安装的版本（Python 3.11）
+# 安装：pip install -r requirements.txt
+# 注意：sentence-transformers 会连带安装 torch / transformers 等大型依赖
+# ============================================================
+
+# ---- LLM 调用（DeepSeek，兼容 OpenAI 接口）----
+openai==2.45.0        # 调用 DeepSeek Chat API 的官方 SDK
+
+# ---- 配置与密钥 ----
+python-dotenv==1.2.2  # 从 .env 文件读取 DeepSeek_API / BoCha_API 等环境变量
+
+# ---- 网络搜索与网页抓取 ----
+requests==2.34.2      # 调用博查（BoCha）联网搜索 API
+httpx==0.28.1         # 抓取网页正文时发送 HTTP 请求（带超时/重定向/浏览器 UA）
+
+# ---- 私有知识库（FAISS 向量检索）----
+numpy==2.4.6          # 向量数据的矩阵运算与类型转换
+faiss-cpu==1.14.3     # 本地向量相似度检索索引（IndexFlatIP，CPU 版）
+sentence-transformers==5.6.1  # 加载 bge-small-zh 模型做文本向量化
+modelscope==1.38.1    # 从国内源下载 bge-small-zh 模型文件（网络更稳定）
+
+# ---- API 服务 ----
+fastapi==0.140.0      # 对外提供 HTTP API 接口
+pydantic==2.13.4      # API 请求/响应的数据模型校验
+uvicorn==0.51.0       # 运行 FastAPI 服务的 ASGI 服务器

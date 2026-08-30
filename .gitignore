@@ -12,6 +12,14 @@ build/
 .venv/
 venv/
 
+# 日志
+logs/
+
+# 测试缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
 # IDE
 .idea/
 .vscode/

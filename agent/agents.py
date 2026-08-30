@@ -157,15 +157,14 @@ def _run_single_turn(
         "report_saved": False,
     }
 
-    # ── 调用 LLM ─────────────────────────────────────────────
-    try:
-        response = client.client.chat.completions.create(
-            model=client.model,
-            messages=messages,
-            tools=tool_schemas,
-        )
-    except Exception as e:
-        error_text = f"LLM API 调用失败（{type(e).__name__}）：{e}"
+    # ── 调用 LLM（内部自带重试，失败返回 None）──────────────
+    response = client.chat_completion_with_retry(
+        model=client.model,
+        messages=messages,
+        tools=tool_schemas,
+    )
+    if response is None:
+        error_text = "LLM API 调用失败（已重试 3 次仍失败）"
         if verbose:
             print(f"  ❌ {error_text}")
         messages.append({
@@ -317,17 +316,17 @@ def _summarize_findings(
     if verbose:
         print(f"  📋 正在生成{label}总结...")
 
-    try:
-        # 不带 tools —— 强制纯文本总结
-        response = client.client.chat.completions.create(
-            model=client.model,
-            messages=messages,
-        )
-        summary = response.choices[0].message.content or ""
-    except Exception as e:
+    # 不带 tools —— 强制纯文本总结
+    response = client.chat_completion_with_retry(
+        model=client.model,
+        messages=messages,
+    )
+    if response is None:
         if verbose:
-            print(f"  ⚠️ 总结失败（{type(e).__name__}），跳过")
+            print("  ⚠️ 总结失败（已重试 3 次），跳过")
         summary = ""
+    else:
+        summary = response.choices[0].message.content or ""
 
     # 将总结作为 assistant 消息追加（保留在上下文）
     messages.append({
@@ -493,16 +492,16 @@ def _summarize_sub_question(
     if verbose:
         print(f"  📋 正在压缩子问题「{sq_desc}」...")
 
-    try:
-        response = client.client.chat.completions.create(
-            model=client.model,
-            messages=messages,
-        )
-        summary = response.choices[0].message.content or ""
-    except Exception as e:
+    response = client.chat_completion_with_retry(
+        model=client.model,
+        messages=messages,
+    )
+    if response is None:
         if verbose:
-            print(f"  ⚠️ 子问题总结失败（{type(e).__name__}），使用原始内容摘要")
-        summary = f"（总结失败：{e}）"
+            print("  ⚠️ 子问题总结失败（已重试 3 次），使用原始内容摘要")
+        summary = "（总结失败）"
+    else:
+        summary = response.choices[0].message.content or ""
 
     messages.append({
         "role": "assistant",
@@ -589,13 +588,20 @@ def deep_research(
 
     sub_questions: list[dict] = []
 
-    try:
-        # 不带 tools 参数 → LLM 只能输出文本，不能调用工具
-        plan_response = client.client.chat.completions.create(
-            model=client.model,
-            messages=messages,
-            # 注意：没有 tools=tool_schemas
-        )
+    # 不带 tools 参数 → LLM 只能输出文本，不能调用工具
+    plan_response = client.chat_completion_with_retry(
+        model=client.model,
+        messages=messages,
+        # 注意：没有 tools=tool_schemas
+    )
+
+    if plan_response is None:
+        if verbose:
+            print("⚠️  规划失败（已重试 3 次），降级为不拆解模式")
+        plan_text = ""
+        # 降级：整个课题作为一个子问题
+        sub_questions = parse_plan_result("")
+    else:
         plan_text = plan_response.choices[0].message.content or ""
 
         if verbose:
@@ -604,12 +610,6 @@ def deep_research(
 
         # 解析子问题列表
         sub_questions = parse_plan_result(plan_text)
-
-    except Exception as e:
-        if verbose:
-            print(f"⚠️  规划失败（{type(e).__name__}: {e}），降级为不拆解模式")
-        # 降级：整个课题作为一个子问题
-        sub_questions = parse_plan_result("")
 
     # 将规划结果作为 assistant 消息加入（保留上下文）
     plan_text_final = (

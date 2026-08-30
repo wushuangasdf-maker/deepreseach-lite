@@ -8,6 +8,7 @@ LLM 驱动的自主深度研究系统 — 输入一个课题，Agent 自动搜�
 - 🧠 **子问题拆解** — 自动将复杂课题拆分为子问题，逐项深挖
 - 📋 **渐进式摘要** — 上下文超 70% 自动压缩，应对长文档 64K 窗口限制
 - 📊 **来源评分** — 搜索结果自动评分（0-100），优先抓取高质量页面
+- 🔄 **双引擎兜底** — 博查搜索失败/空结果时自动降级到百度千帆搜索
 - 🌐 **HTTP 服务** — FastAPI + SSE 实时进度推送，支持异步任务
 - 🎚️ **三种深度** — quick / standard / deep，适配不同场景
 
@@ -32,6 +33,8 @@ deepresearch-lite/
 ├── core/                   # 基础设施
 │   ├── llm.py              #   LLM 客户端工厂（OpenAI 兼容接口）
 │   ├── bocha_search.py     #   博查 AI 搜索引擎封装
+│   ├── baidu_search.py     #   百度千帆搜索引擎封装（兜底）
+│   ├── search.py           #   双引擎兜底调度（博查 → 百度）
 │   ├── knowledge_base.py   #   本地知识库（FAISS + BGE）
 │   ├── source_ranker.py    #   搜索结果评分排序
 │   └── config.py           #   配置中心（从 .env 读取）
@@ -51,6 +54,7 @@ deepresearch-lite/
 
 - Python 3.10+
 - [博查 AI](https://open.bochaai.com/) API Key（网页搜索）
+- [百度智能云千帆](https://cloud.baidu.com/doc/qianfan-api/s/Wmbq4z7e5) API Key（可选，搜索失败时兜底）
 - [DeepSeek](https://platform.deepseek.com/) API Key（LLM）
 
 ### 2. 安装
@@ -68,6 +72,7 @@ pip install -r requirements.txt
 ```env
 DeepSeek_API="sk-your-deepseek-key"
 BoCha_API="sk-your-bocha-key"
+Baidu_API="bce-v3-your-baidu-qianfan-key"
 ```
 
 ### 4. 使用
@@ -87,10 +92,9 @@ python agent/cli.py --depth deep "量子计算对现有加密体系的冲击"
 
 **HTTP 服务**：
 
-```bash
-uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+```bash0
+...........0uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
-
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/research` | `POST` | 创建并启动研究任务 |

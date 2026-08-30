@@ -1,10 +1,12 @@
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.bocha_search import bocha_search, build_context
+from core.bocha_search import build_context
+from core.search import search_with_fallback
 TOOL_NAME="web_search_tool"
 TOOL_DESCRIPTION=(
     "使用博查 AI 搜索引擎搜索互联网，获取与查询相关的网页信息。"
+    "博查无结果时自动降级到百度千帆搜索。"
     "返回每条结果的标题、URL 和内容摘要。"
     "适用场景：需要最新信息、事实核查、查找资料、了解当前事件。"
     "不适用场景：纯数学计算、代码生成、翻译。"
@@ -45,7 +47,7 @@ def web_search_tool(query: str, count: int = 5) -> str:
       if count < 1 or count > 10:
            count=10
       try:
-           pages:list[dict]=bocha_search(query,count)
+           pages:list[dict]=search_with_fallback(query,count)
       except Exception as e:
            error_type=type(e).__name__
            return (                                                      
