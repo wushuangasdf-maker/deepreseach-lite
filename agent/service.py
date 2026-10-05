@@ -3,7 +3,7 @@
 
 设计要点：
   - ThreadPoolExecutor: 在独立线程中运行同步的 deep_research()
-  - sys.stdout 重定向: 捕获 verbose 输出 → 供 SSE 实时推送
+  - 输出流注入: 每任务独立 StringIO，经 out 参数传给 deep_research
   - 内存任务表: 线程安全的 dict，最多保留 100 个任务
 """
 
@@ -12,13 +12,12 @@ import time
 import threading
 import traceback
 import io
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-from agent.agents import deep_research
+from agent.agents import deep_research, ResearchCancelled
 
 
 class TaskStatus(str, Enum):
@@ -26,6 +25,7 @@ class TaskStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -39,6 +39,7 @@ class ResearchTask:
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
+    cancel_event: threading.Event = field(default_factory=threading.Event)
 
     @property
     def elapsed(self) -> Optional[float]:
@@ -100,25 +101,38 @@ class ResearchService:
         if not task:
             return
 
+        # ── 排队期已被取消：直接标记，不启动 ──
+        if task.cancel_event.is_set():
+            task.status = TaskStatus.CANCELLED
+            task.finished_at = time.time()
+            task.result = "任务已在启动前被取消。"
+            return
+
         task.status = TaskStatus.RUNNING
         task.started_at = time.time()
 
-        # 用 StringIO 捕获所有 verbose 输出
+        # 每个任务一个独立 StringIO，经 out 参数注入 deep_research。
+        # 不再重定向全局 sys.stdout，避免并发任务日志互相串扰。
         captured = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured
 
         try:
             final = deep_research(
                 topic=task.topic,
                 depth=task.depth,
                 verbose=True,
+                cancel_event=task.cancel_event,
+                out=captured,
             )
             # 拼接：捕获的日志 + 最终返回值
             task.result = captured.getvalue()
             if final:
                 task.result += f"\n{final}"
             task.status = TaskStatus.COMPLETED
+
+        except ResearchCancelled:
+            task.result = captured.getvalue()
+            task.result += "\n[任务已取消]"
+            task.status = TaskStatus.CANCELLED
 
         except Exception as e:
             task.result = captured.getvalue()
@@ -127,12 +141,36 @@ class ResearchService:
             task.status = TaskStatus.FAILED
 
         finally:
-            sys.stdout = old_stdout
             task.finished_at = time.time()
 
     def run_async(self, task_id: str) -> None:
         """提交到线程池，立即返回"""
         self._executor.submit(self._run_research, task_id)
+
+    def cancel_task(self, task_id: str):
+        """
+        取消指定任务。
+
+        返回:
+            None   — 任务不存在（上层返回 404）
+            False  — 任务已终态，无法取消（上层返回 409）
+            True   — 取消请求已受理（置位 Event；PENDING 直接标记 CANCELLED）
+        """
+        task = self._tasks.get(task_id)
+        if task is None:
+            return None
+        if task.status in (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        ):
+            return False
+
+        task.cancel_event.set()  # 唯一取消真源（原子操作）
+        if task.status == TaskStatus.PENDING:
+            task.status = TaskStatus.CANCELLED
+            task.finished_at = time.time()
+        return True
 
 
 # 全局单例

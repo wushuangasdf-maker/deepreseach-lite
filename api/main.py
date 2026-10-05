@@ -10,6 +10,7 @@ uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
   GET    /research/{task_id}          查询单个任务状态
   GET    /research/{task_id}/stream   SSE 实时进度流
   GET    /research/{task_id}/report   获取完整报告
+  DELETE /research/{task_id}          取消运行中的任务
   GET    /health                      健康检查
 """
 
@@ -17,7 +18,7 @@ import json
 import asyncio
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -177,6 +178,22 @@ def get_report(task_id: str):
         "depth": task.depth,
         "report": task.result,
     }
+
+
+@app.delete("/research/{task_id}")
+def cancel_task(task_id: str):
+    """取消指定任务。PENDING 直接取消，RUNNING 受理后由 worker 在检查点终止。"""
+    result = research_service.cancel_task(task_id)
+    if result is None:
+        raise HTTPException(404, detail=f"任务 {task_id} 不存在")
+    if result is False:
+        raise HTTPException(409, detail="任务已结束，无法取消")
+    task = research_service.get_task(task_id)
+    status_code = 202 if task.status == TaskStatus.RUNNING else 200
+    return JSONResponse(
+        status_code=status_code,
+        content={"task_id": task_id, "status": task.status.value},
+    )
 
 
 @app.get("/health")

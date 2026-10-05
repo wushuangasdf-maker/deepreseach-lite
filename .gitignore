@@ -30,6 +30,9 @@ data/kb/chunks.json
 data/reports/*
 !data/reports/.gitkeep
 
+# 研究报告输出（含用户隐私，不入库）
+reports/
+
 # 系统文件
 .DS_Store
 Thumbs.db

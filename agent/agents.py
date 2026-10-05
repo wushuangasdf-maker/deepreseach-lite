@@ -26,6 +26,7 @@ import json
 import sys
 import os
 import re
+import threading
 
 # 确保项目根目录在 sys.path 中，方便直接从命令行运行
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -39,6 +40,20 @@ from tools.fetch_page import fetch_page_tool, get_tool_schema as fetch_page_sche
 from tools.kb_search import kb_search_tool, get_tool_schema as kb_search_schema
 from tools.save_report import save_report_tool, get_tool_schema as save_report_schema
 from agent.prompts.plan import build_plan_prompt, parse_plan_result
+
+
+# ── 任务取消 ─────────────────────────────────────────────────
+# 协作式取消：主线程设置 Event，研究循环在检查点主动抛出 ResearchCancelled，
+# 由 service 层捕获并标记任务为 CANCELLED。
+class ResearchCancelled(Exception):
+    """用户取消研究任务时抛出，用于冒泡到服务层。"""
+
+
+def _check_cancelled(event) -> None:
+    """若取消标志已置位则抛出 ResearchCancelled；event 为 None 时放行。"""
+    if event is not None and event.is_set():
+        raise ResearchCancelled()
+
 
 # ── 工具注册表 ─────────────────────────────────────────────────
 # 每项为 (可调用函数, schema 获取函数)。
@@ -125,6 +140,8 @@ def _run_single_turn(
     tool_map: dict,
     client,
     verbose: bool = True,
+    cancel_event: threading.Event = None,
+    out=None,
 ) -> dict:
     """
     执行单轮 ReAct 循环：调用 LLM → 处理响应 → 执行工具 → 回填结果。
@@ -166,7 +183,7 @@ def _run_single_turn(
     if response is None:
         error_text = "LLM API 调用失败（已重试 3 次仍失败）"
         if verbose:
-            print(f"  ❌ {error_text}")
+            print(f"  ❌ {error_text}", file=out)
         messages.append({
             "role": "user",
             "content": (
@@ -207,6 +224,7 @@ def _run_single_turn(
 
         # 逐个执行工具
         for tc in message.tool_calls:
+            _check_cancelled(cancel_event)  # 工具之间检查取消
             tool_name = tc.function.name
 
             # JSON 参数解析
@@ -224,7 +242,7 @@ def _run_single_turn(
                     "content": error_msg,
                 })
                 if verbose:
-                    print(f"  ❌ {tool_name} → JSON 解析失败")
+                    print(f"  ❌ {tool_name} → JSON 解析失败", file=out)
                 continue
 
             # 统计
@@ -239,7 +257,7 @@ def _run_single_turn(
                 args_preview = json.dumps(tool_args, ensure_ascii=False)
                 if len(args_preview) > 100:
                     args_preview = args_preview[:97] + "..."
-                print(f"  🔧 {tool_name}({args_preview})")
+                print(f"  🔧 {tool_name}({args_preview})", file=out)
 
             # 执行工具
             tool_result = _execute_tool(tool_name, tool_args, tool_map)
@@ -254,7 +272,7 @@ def _run_single_turn(
                 preview = tool_result[:150].replace("\n", " ")
                 if len(tool_result) > 150:
                     preview += "..."
-                print(f"     ↳ {preview}")
+                print(f"     ↳ {preview}", file=out)
 
             # 回填 tool 结果到消息历史
             messages.append({
@@ -275,7 +293,7 @@ def _run_single_turn(
         preview = content[:200].replace("\n", " ")
         if len(content) > 200:
             preview += "..."
-        print(f"  💬 {preview}")
+        print(f"  💬 {preview}", file=out)
 
     return result
 
@@ -287,6 +305,7 @@ def _summarize_findings(
     client,
     label: str = "当前批次",
     verbose: bool = True,
+    out=None,
 ) -> str:
     """
     让 LLM 对当前对话中的研究发现进行简要总结。
@@ -314,7 +333,7 @@ def _summarize_findings(
     messages.append({"role": "user", "content": summary_prompt})
 
     if verbose:
-        print(f"  📋 正在生成{label}总结...")
+        print(f"  📋 正在生成{label}总结...", file=out)
 
     # 不带 tools —— 强制纯文本总结
     response = client.chat_completion_with_retry(
@@ -323,7 +342,7 @@ def _summarize_findings(
     )
     if response is None:
         if verbose:
-            print("  ⚠️ 总结失败（已重试 3 次），跳过")
+            print("  ⚠️ 总结失败（已重试 3 次），跳过", file=out)
         summary = ""
     else:
         summary = response.choices[0].message.content or ""
@@ -338,7 +357,7 @@ def _summarize_findings(
         preview = summary[:200].replace("\n", " ")
         if len(summary) > 200:
             preview += "..."
-        print(f"     ↳ {preview}")
+        print(f"     ↳ {preview}", file=out)
 
     return summary
 
@@ -408,6 +427,7 @@ def _compress_current_sub_question(
     preamble_end_index: int,
     topic: str,
     verbose: bool = True,
+    out=None,
 ) -> None:
     """
     压缩当前子问题的研究成果：总结 → 存入笔记 → 裁剪消息 → 重建笔记。
@@ -435,6 +455,7 @@ def _compress_current_sub_question(
         messages=messages,
         client=client,
         verbose=verbose,
+        out=out,
     )
 
     # Step 2: 追加到研究笔记
@@ -452,7 +473,7 @@ def _compress_current_sub_question(
 
     if verbose:
         print(f"  📋 子问题已压缩（研究笔记累计 {len(research_notes)} 条，"
-              f"上下文约 {_estimate_tokens(messages)} tokens）")
+              f"上下文约 {_estimate_tokens(messages)} tokens）", file=out)
 
 
 def _summarize_sub_question(
@@ -460,6 +481,7 @@ def _summarize_sub_question(
     messages: list[dict],
     client,
     verbose: bool = True,
+    out=None,
 ) -> str:
     """
     对当前子问题的研究发现做简要总结。
@@ -490,7 +512,7 @@ def _summarize_sub_question(
     messages.append({"role": "user", "content": summary_prompt})
 
     if verbose:
-        print(f"  📋 正在压缩子问题「{sq_desc}」...")
+        print(f"  📋 正在压缩子问题「{sq_desc}」...", file=out)
 
     response = client.chat_completion_with_retry(
         model=client.model,
@@ -498,7 +520,7 @@ def _summarize_sub_question(
     )
     if response is None:
         if verbose:
-            print("  ⚠️ 子问题总结失败（已重试 3 次），使用原始内容摘要")
+            print("  ⚠️ 子问题总结失败（已重试 3 次），使用原始内容摘要", file=out)
         summary = "（总结失败）"
     else:
         summary = response.choices[0].message.content or ""
@@ -512,7 +534,7 @@ def _summarize_sub_question(
         preview = summary[:200].replace("\n", " ")
         if len(summary) > 200:
             preview += "..."
-        print(f"     ↳ {preview}")
+        print(f"     ↳ {preview}", file=out)
 
     return summary
 
@@ -526,6 +548,8 @@ def deep_research(
     force_report_at: int = 8,
     verbose: bool = True,
     depth: str = "standard",
+    cancel_event: threading.Event = None,
+    out=None,
 ) -> str:
     """
     执行深度研究并返回结果摘要。
@@ -541,11 +565,14 @@ def deep_research(
         max_turns:       最大对话轮数（含报告阶段），默认 12
         force_report_at: 在此轮数后开始建议 LLM 进入撰写阶段，默认 8
         verbose:         是否实时打印每个 tool call 和 LLM 响应
+        cancel_event:   可选的取消标志；置位时在检查点抛 ResearchCancelled
 
     返回:
         str: 研究完成的最终状态描述
     """
     # ── 初始化 ─────────────────────────────────────────────────
+    _check_cancelled(cancel_event)  # CP0：排队期已被取消则立即退出
+
     tool_schemas = _build_tool_schemas()
     tool_map = _build_tool_map()
     tool_names = list(tool_map.keys())
@@ -570,12 +597,12 @@ def deep_research(
     hint_given = False      # 是否已发出"建议动笔"提示
 
     if verbose:
-        print(f"\n{'=' * 60}")
-        print(f"🔍  深度研究开始")
-        print(f"📋  课题：{topic}")
-        print(f"🔧  可用工具：{tool_names}")
-        print(f"📐  最大 {max_turns} 轮，第 {force_report_at} 轮后建议撰写报告")
-        print(f"{'=' * 60}\n")
+        print(f"\n{'=' * 60}", file=out)
+        print(f"🔍  深度研究开始", file=out)
+        print(f"📋  课题：{topic}", file=out)
+        print(f"🔧  可用工具：{tool_names}", file=out)
+        print(f"📐  最大 {max_turns} 轮，第 {force_report_at} 轮后建议撰写报告", file=out)
+        print(f"{'=' * 60}\n", file=out)
     # ── 阶段 0：任务拆解 ──────────────────────────────────────
     # 在开始搜索之前，先让 LLM 拆解课题为子问题。
     # 这次调用不带 tools —— 强制 LLM 停留在思考模式。
@@ -584,7 +611,7 @@ def deep_research(
     messages.append({"role": "user", "content": plan_prompt})
 
     if verbose:
-        print("🧠  规划阶段：正在拆解研究课题...")
+        print("🧠  规划阶段：正在拆解研究课题...", file=out)
 
     sub_questions: list[dict] = []
 
@@ -597,7 +624,7 @@ def deep_research(
 
     if plan_response is None:
         if verbose:
-            print("⚠️  规划失败（已重试 3 次），降级为不拆解模式")
+            print("⚠️  规划失败（已重试 3 次），降级为不拆解模式", file=out)
         plan_text = ""
         # 降级：整个课题作为一个子问题
         sub_questions = parse_plan_result("")
@@ -606,7 +633,7 @@ def deep_research(
 
         if verbose:
             preview = plan_text[:300].replace("\n", " ")
-            print(f"📋  规划结果：{preview}...")
+            print(f"📋  规划结果：{preview}...", file=out)
 
         # 解析子问题列表
         sub_questions = parse_plan_result(plan_text)
@@ -645,14 +672,14 @@ def deep_research(
     force_report_at = max_turns - 4  # 最后 4 轮留给汇总和报告
 
     if verbose:
-        print(f"\n📋  拆解完成：{len(sub_questions)} 个子问题")
+        print(f"\n📋  拆解完成：{len(sub_questions)} 个子问题", file=out)
         for i, sq in enumerate(sub_questions, 1):
-            print(f"     {i}. {sq['desc']}")
-            print(f"        搜索词：{sq['search_kw']}")
-        print(f"📐  轮数调整为 {max_turns}（原定上限已覆盖）")
+            print(f"     {i}. {sq['desc']}", file=out)
+            print(f"        搜索词：{sq['search_kw']}", file=out)
+        print(f"📐  轮数调整为 {max_turns}（原定上限已覆盖）", file=out)
         if should_summarize:
-            print(f"📋  渐进式摘要已激活（子问题>{_SUMMARIZE_THRESHOLD}个，每项完成后自动压缩）")
-        print(f"{'=' * 60}\n")
+            print(f"📋  渐进式摘要已激活（子问题>{_SUMMARIZE_THRESHOLD}个，每项完成后自动压缩）", file=out)
+        print(f"{'=' * 60}\n", file=out)
 
     # ── 阶段 1：串行研究 ──────────────────────────────────────
     # 按子问题逐项研究，每项 1-2 轮（取决于来源评分）
@@ -660,18 +687,19 @@ def deep_research(
     global_turn = 1  # 全局轮数计数器（规划阶段已用 1 轮）
 
     for sq_index, sq in enumerate(sub_questions):
+        _check_cancelled(cancel_event)  # CP1：子问题之间检查取消
         if global_turn > max_turns:
             if verbose:
-                print(f"  ⚠️ 已达最大轮数 {max_turns}，跳过剩余子问题")
+                print(f"  ⚠️ 已达最大轮数 {max_turns}，跳过剩余子问题", file=out)
             break
 
         # ── 打印子问题标题 ──
         if verbose:
-            print(f"\n{'─' * 40}")
-            print(f"📋 子问题 [{sq_index + 1}/{len(sub_questions)}]：{sq['desc']}")
-            print(f"   搜索建议：{sq['search_kw']}")
-            print(f"   （第 {global_turn}/{max_turns} 轮）")
-            print(f"{'─' * 40}")
+            print(f"\n{'─' * 40}", file=out)
+            print(f"📋 子问题 [{sq_index + 1}/{len(sub_questions)}]：{sq['desc']}", file=out)
+            print(f"   搜索建议：{sq['search_kw']}", file=out)
+            print(f"   （第 {global_turn}/{max_turns} 轮）", file=out)
+            print(f"{'─' * 40}", file=out)
 
         # ── 注入子问题指令 ──
         sq_instruction = (
@@ -691,49 +719,53 @@ def deep_research(
 
         # ── 第 1 轮 ──
         if verbose:
-            print(f"  🔍 第 1 轮...")
+            print(f"  🔍 第 1 轮...", file=out)
 
+        _check_cancelled(cancel_event)  # CP2：第 1 轮前检查取消
         r1 = _run_single_turn(
-            messages, tool_schemas, tool_map, client, verbose,
+            messages, tool_schemas, tool_map, client, verbose, cancel_event,
+            out=out,
         )
         global_turn += 1
         source_count += r1["source_delta"]
 
         if r1["report_saved"]:
             if verbose:
-                print(f"\n✅ 研究报告已生成并保存")
-                print(f"📊 共收集 {source_count} 个页面来源")
-                print(f"🔄 共执行 {global_turn - 1} 轮对话")
+                print(f"\n✅ 研究报告已生成并保存", file=out)
+                print(f"📊 共收集 {source_count} 个页面来源", file=out)
+                print(f"🔄 共执行 {global_turn - 1} 轮对话", file=out)
             return "报告已成功生成并保存。"
 
         # ── 评分判断：是否需要第 2 轮 ──
         if r1["highest_score"] >= 75:
             if verbose:
-                print(f"  ✅ 来源评分 {r1['highest_score']} ≥ 75，一轮通过")
+                print(f"  ✅ 来源评分 {r1['highest_score']} ≥ 75，一轮通过", file=out)
             # ── 渐进式摘要（方案A）：压缩当前子问题 ──
             if should_summarize:
                 _compress_current_sub_question(
                     sq, messages, client, research_notes,
                     preamble_end_index, topic, verbose,
+                    out=out,
                 )
                 global_turn += 1  # 总结消耗 1 轮
             continue
 
         if global_turn > max_turns:
             if verbose:
-                print(f"  ⚠️ 已达最大轮数，跳过第 2 轮")
+                print(f"  ⚠️ 已达最大轮数，跳过第 2 轮", file=out)
             # ── 渐进式摘要（方案A）──
             if should_summarize:
                 _compress_current_sub_question(
                     sq, messages, client, research_notes,
                     preamble_end_index, topic, verbose,
+                    out=out,
                 )
                 global_turn += 1
             continue
 
         # ── 第 2 轮 ──
         if verbose:
-            print(f"  🔍 第 2 轮补充搜索（最高评分 {r1['highest_score']} < 75）...")
+            print(f"  🔍 第 2 轮补充搜索（最高评分 {r1['highest_score']} < 75）...", file=out)
 
         messages.append({
             "role": "user",
@@ -744,17 +776,19 @@ def deep_research(
             ),
         })
 
+        _check_cancelled(cancel_event)  # CP3：第 2 轮前检查取消
         r2 = _run_single_turn(
-            messages, tool_schemas, tool_map, client, verbose,
+            messages, tool_schemas, tool_map, client, verbose, cancel_event,
+            out=out,
         )
         global_turn += 1
         source_count += r2["source_delta"]
 
         if r2["report_saved"]:
             if verbose:
-                print(f"\n✅ 研究报告已生成并保存")
-                print(f"📊 共收集 {source_count} 个页面来源")
-                print(f"🔄 共执行 {global_turn - 1} 轮对话")
+                print(f"\n✅ 研究报告已生成并保存", file=out)
+                print(f"📊 共收集 {source_count} 个页面来源", file=out)
+                print(f"🔄 共执行 {global_turn - 1} 轮对话", file=out)
             return "报告已成功生成并保存。"
 
         # ── 渐进式摘要（方案A）：第 2 轮完成后压缩 ──
@@ -767,13 +801,15 @@ def deep_research(
 
     # ── 阶段 2：汇总 ──
     if verbose:
-        print(f"\n{'─' * 40}")
-        print(f"📋 所有子问题研究完毕")
-        print(f"📊 共收集 {source_count} 个页面来源")
-        print(f"🔄 共执行 {global_turn - 1} 轮")
+        print(f"\n{'─' * 40}", file=out)
+        print(f"📋 所有子问题研究完毕", file=out)
+        print(f"📊 共收集 {source_count} 个页面来源", file=out)
+        print(f"🔄 共执行 {global_turn - 1} 轮", file=out)
         if research_notes:
-            print(f"📋 研究笔记模式：已累积 {len(research_notes)} 条子问题摘要")
-        print(f"{'─' * 40}")
+            print(f"📋 研究笔记模式：已累积 {len(research_notes)} 条子问题摘要", file=out)
+        print(f"{'─' * 40}", file=out)
+
+    _check_cancelled(cancel_event)  # CP5：汇总前检查取消
 
     if research_notes:
         # 渐进摘要模式：研究笔记已是汇总，做一次轻量全局聚合即可
@@ -782,6 +818,7 @@ def deep_research(
                 messages, client,
                 label="全部子问题（基于研究笔记）",
                 verbose=verbose,
+                out=out,
             )
             global_turn += 1
     else:
@@ -790,12 +827,13 @@ def deep_research(
             messages, client,
             label="全部子问题",
             verbose=verbose,
+            out=out,
         )
         global_turn += 1
 
     # ── 阶段 3：报告撰写 ──────────────────────────────────────
     if verbose:
-        print(f"\n📝 进入报告撰写阶段...")
+        print(f"\n📝 进入报告撰写阶段...", file=out)
 
     report_prompt = build_report_prompt(
         topic, source_count, depth=depth,
@@ -810,29 +848,32 @@ def deep_research(
     messages.append({"role": "user", "content": report_prompt})
 
     while global_turn <= max_turns:
+        _check_cancelled(cancel_event)  # CP4：报告每轮前检查取消
         if verbose:
-            print(f"--- 📝 报告阶段 | 第 {global_turn}/{max_turns} 轮 ---")
+            print(f"--- 📝 报告阶段 | 第 {global_turn}/{max_turns} 轮 ---", file=out)
 
         result = _run_single_turn(
-            messages, tool_schemas, tool_map, client, verbose,
+            messages, tool_schemas, tool_map, client, verbose, cancel_event,
+            out=out,
         )
         global_turn += 1
         source_count += result["source_delta"]
 
         if result["report_saved"]:
             if verbose:
-                print(f"\n✅ 研究报告已生成并保存")
-                print(f"📊 共收集 {source_count} 个页面来源")
-                print(f"🔄 共执行 {global_turn - 1} 轮对话")
+                print(f"\n✅ 研究报告已生成并保存", file=out)
+                print(f"📊 共收集 {source_count} 个页面来源", file=out)
+                print(f"🔄 共执行 {global_turn - 1} 轮对话", file=out)
             return "报告已成功生成并保存。"
 
     # ── 超时未生成报告 ──
     if verbose:
         print(
             f"\n⚠️ 达到最大轮数上限（{max_turns}），"
-            f"但 LLM 未显式调用 save_report_tool。"
+            f"但 LLM 未显式调用 save_report_tool。",
+            file=out,
         )
-        print(f"📊 共收集 {source_count} 个页面来源")
+        print(f"📊 共收集 {source_count} 个页面来源", file=out)
 
     return (
         f"研究循环结束（共 {global_turn - 1} 轮）。"
