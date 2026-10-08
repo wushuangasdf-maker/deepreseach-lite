@@ -4,6 +4,8 @@
 
 LLM 驱动的自主深度研究系统 — 输入一个课题，Agent 自动搜索、抓取、交叉验证，产出结构化中文研究报告。
 
+> 📄 **示例报告**：[examples/sample_report.md](examples/sample_report.md) — 系统真实生成（主题「大语言模型 Agent」，7 个章节 + 7 个引用来源）。
+
 ## ✨ 特性
 
 - 🔍 **多轮自主研究** — ReAct 循环编排，LLM 自主决定搜索与抓取策略
