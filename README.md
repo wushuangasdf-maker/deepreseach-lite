@@ -1,5 +1,7 @@
 # DeepResearch-Lite
 
+[![CI](https://github.com/wushuangasdf-maker/deepreseach-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/wushuangasdf-maker/deepreseach-lite/actions)
+
 LLM 驱动的自主深度研究系统 — 输入一个课题，Agent 自动搜索、抓取、交叉验证，产出结构化中文研究报告。
 
 ## ✨ 特性

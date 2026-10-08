@@ -6,9 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+# 同一分支连续 push 时，取消上一次还在跑的运行，避免排队堆积
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
