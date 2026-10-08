@@ -55,8 +55,13 @@ class _FakeClient:
 
 
 def _make_client(create_fn) -> DeepSeekClient:
-    """构造 DeepSeekClient，并将其 client 替换为假对象，create 行为由 create_fn 决定。"""
-    client = DeepSeekClient()
+    """构造 DeepSeekClient，并将其 client 替换为假对象，create 行为由 create_fn 决定。
+
+    用 object.__new__ 跳过 __init__：__init__ 会读取 DeepSeek_API 环境变量并创建
+    真实 OpenAI 客户端，CI 无 .env 时会因缺 key 直接抛「Missing credentials」。
+    """
+    client = object.__new__(DeepSeekClient)
+    client.model = "deepseek-chat"  # chat_completion_with_retry 不依赖 model，仅保持实例完整
     client.client = _FakeClient(_FakeChat(_FakeCompletions(create_fn)))
     return client
 
