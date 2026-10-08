@@ -27,8 +27,6 @@ htmlcov/
 # 数据文件（索引文件较大，不入库）
 data/kb/index.faiss
 data/kb/chunks.json
-data/reports/*
-!data/reports/.gitkeep
 
 # 研究报告输出（含用户隐私，不入库）
 reports/
@@ -36,3 +34,11 @@ reports/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 项目笔记与研究文档（个人，不上传）
+研究.md
+CLAUDE.md
+
+# AI 助手配置与文档索引（本地，不上传）
+claude/
+.claude/

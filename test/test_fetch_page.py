@@ -15,6 +15,7 @@ import httpx
 from tools.fetch_page import (
     _extract_content,
     _fallback_extract,
+    _fetch_html,
     _format_http_error,
     fetch_page_tool,
 )
@@ -116,3 +117,125 @@ def test_extract_content_returns_text():
     """入口函数对简单 HTML 返回非空文本。"""
     html = "<p>这是一段正文内容，用于验证提取入口可用。</p>"
     assert _extract_content(html).strip()
+
+
+def test_extract_content_trafilatura(monkeypatch):
+    """trafilatura 可用且返回长文本时，走 trafilatura 分支。"""
+    import sys
+    import types
+
+    traf = types.ModuleType("trafilatura")
+    traf.extract = lambda html, **kw: "这是一段超过一百字符的正文内容。" * 8
+    monkeypatch.setitem(sys.modules, "trafilatura", traf)
+
+    text = _extract_content("<html>x</html>")
+    assert "正文内容" in text
+
+
+# ── fetch_page_tool：完整执行路径（mock _fetch_html / _extract_content）──
+
+def test_fetch_page_success(monkeypatch):
+    """正常抓取：返回带【网页正文】头与正文文本。"""
+    monkeypatch.setattr("tools.fetch_page._fetch_html", lambda url: "<html>ok</html>")
+    monkeypatch.setattr(
+        "tools.fetch_page._extract_content",
+        lambda html: "这是一段足够长的正文内容，用于验证抓取成功的完整路径。" * 2,
+    )
+    result = fetch_page_tool("http://example.com")
+    assert "【网页正文】" in result
+    assert "http://example.com" in result
+
+
+def test_fetch_page_truncates(monkeypatch):
+    """正文超过 max_length → 截断并标注。"""
+    monkeypatch.setattr("tools.fetch_page._fetch_html", lambda url: "<html>ok</html>")
+    monkeypatch.setattr("tools.fetch_page._extract_content", lambda html: "x" * 500)
+    result = fetch_page_tool("http://example.com", max_length=200)
+    assert "已截断" in result
+
+
+def test_fetch_page_max_length_clamped(monkeypatch):
+    """max_length < 100 → 钳制为 8000，不按原值截断。"""
+    monkeypatch.setattr("tools.fetch_page._fetch_html", lambda url: "<html>ok</html>")
+    monkeypatch.setattr("tools.fetch_page._extract_content", lambda html: "y" * 120)
+    result = fetch_page_tool("http://example.com", max_length=50)
+    assert "已截断" not in result  # 120 < 8000，未被截断
+
+
+def test_fetch_page_html_none(monkeypatch):
+    """抓取返回 None → 提示无法获取页面。"""
+    monkeypatch.setattr("tools.fetch_page._fetch_html", lambda url: None)
+    assert "无法获取页面内容" in fetch_page_tool("http://example.com")
+
+
+def test_fetch_page_fetch_error(monkeypatch):
+    """抓取抛异常 → 走 _format_http_error。"""
+    def boom(url):
+        raise httpx.ConnectError("c")
+
+    monkeypatch.setattr("tools.fetch_page._fetch_html", boom)
+    assert "网络请求失败" in fetch_page_tool("http://example.com")
+
+
+def test_fetch_page_extract_error(monkeypatch):
+    """正文提取抛异常 → 提示提取失败。"""
+    monkeypatch.setattr("tools.fetch_page._fetch_html", lambda url: "<html>ok</html>")
+
+    def boom(html):
+        raise ValueError("bad html")
+
+    monkeypatch.setattr("tools.fetch_page._extract_content", boom)
+    assert "正文提取失败" in fetch_page_tool("http://example.com")
+
+
+def test_fetch_page_short_content(monkeypatch):
+    """提取正文过短 → 提示未提取到有效正文。"""
+    monkeypatch.setattr("tools.fetch_page._fetch_html", lambda url: "<html>ok</html>")
+    monkeypatch.setattr("tools.fetch_page._extract_content", lambda html: "太短")
+    assert "未能从页面中提取到有效正文" in fetch_page_tool("http://example.com")
+
+
+# ── _fetch_html：httpx 边界 ──────────────────────────────
+
+def test_fetch_html_success(monkeypatch):
+    """httpx 成功响应 → 返回 response.text。"""
+    class _Resp:
+        text = "<html>ok</html>"
+
+        def raise_for_status(self):
+            return None
+
+    class _Client:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+    assert _fetch_html("http://example.com") == "<html>ok</html>"
+
+
+def test_fetch_html_error_returns_none(monkeypatch):
+    """httpx 抛异常 → 返回 None。"""
+    class _Client:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            raise httpx.ConnectError("c")
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+    assert _fetch_html("http://example.com") is None

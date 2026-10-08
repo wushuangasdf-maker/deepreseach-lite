@@ -4,7 +4,7 @@ DeepResearch-Lite 命令行入口。
 用法:
     python cli.py "量子计算对现有加密体系的冲击"
     python cli.py --depth quick "今天的天气"
-    python cli.py --depth deep --output my_report.md "AI Agent 最新进展"
+    python cli.py --depth deep --output my_reports "AI Agent 最新进展"
 
 参数:
     question       研究主题（位置参数，必填）
@@ -12,7 +12,7 @@ DeepResearch-Lite 命令行入口。
                      quick:    只搜索一轮，快速出结果
                      standard: 两轮搜索 + 交叉验证（推荐）
                      deep:     三轮搜索，覆盖更全面
-    --output       报告输出路径（默认 data/reports/<时间戳>.md）
+    --output       报告输出目录（默认 reports/）
     --verbose      显示详细的工具调用过程（默认开启，--quiet 关闭）
     --quiet        静默模式，只输出最终报告路径
 """
@@ -79,7 +79,7 @@ def main():
          示例:
          python cli.py "量子计算对银行业的冲击"
          python cli.py --depth quick "今天天气怎么样"
-         python cli.py --depth deep --output 报告.md "2026年AI趋势"
+         python cli.py --depth deep --output 我的报告 "2026年AI趋势"
             """,
           )
     parser.add_argument("question", type=str, help="研究主题（必填）")
@@ -89,7 +89,7 @@ def main():
         "--output",
         type=str,
         default=None,
-        help="报告输出路径。不指定则自动生成到 data/reports/ 目录",
+        help="报告输出目录。不指定则默认保存到 reports/ 目录",
     )
     parser.add_argument(
         "--quiet",
@@ -128,6 +128,7 @@ def main():
             max_turns=config["max_turns"],
             force_report_at=config["force_report_at"],
             verbose=verbose,
+            output_dir=args.output,
         )
     except KeyboardInterrupt:
         logger.warning("用户中断，已搜索的信息已丢失。")

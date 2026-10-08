@@ -9,7 +9,13 @@
   - verbose=False 关闭打印，同时验证静默路径不崩溃。
 """
 
-from agent.agents import deep_research
+import json
+
+from agent.agents import (
+    deep_research,
+    _estimate_tokens,
+    _context_over_budget,
+)
 
 
 # ── fake 结构：脚本化 client 与响应 ──────────────────────
@@ -123,3 +129,57 @@ def test_deep_research_plan_failure_degrades(monkeypatch):
     result = deep_research("AI芯片市场", max_turns=12, force_report_at=8, verbose=False)
 
     assert result == "报告已成功生成并保存。"
+
+
+# ── 渐进式摘要：token 预算触发 ─────────────────────────
+
+
+def test_estimate_tokens():
+    """_estimate_tokens：字符数 / 2.5 的启发式估算，值正确且随内容单调增长。"""
+    msgs = [{"role": "user", "content": "hello"}]
+    expected = int(len(json.dumps(msgs[0], ensure_ascii=False)) / 2.5)
+    assert _estimate_tokens(msgs) == expected
+
+    longer = [{"role": "user", "content": "x" * 1000}]
+    assert _estimate_tokens(longer) > _estimate_tokens(msgs)
+
+
+def test_context_over_budget(monkeypatch):
+    """_context_over_budget：低于预算为 False，高于预算为 True。"""
+    monkeypatch.setattr("agent.agents._estimate_tokens", lambda msgs: 1000)
+    assert _context_over_budget([]) is False
+
+    monkeypatch.setattr("agent.agents._estimate_tokens", lambda msgs: 100000)
+    assert _context_over_budget([]) is True
+
+
+def test_dynamic_summarize_trigger(monkeypatch):
+    """子问题数 ≤ 阈值但上下文超预算时，动态启用渐进式摘要并仍完成报告。"""
+    plan_text = "1. 市场规模 | AI芯片 市场\n2. 竞争格局 | AI芯片 厂商"
+
+    client = _ScriptedClient([
+        _text(plan_text),                  # 0 规划
+        _text("研究了市场规模。"),           # 1 子问题1 第1轮
+        _text("补充市场信息。"),             # 2 子问题1 第2轮
+        _text("研究了竞争格局。"),           # 3 子问题2 第1轮
+        _text("补充厂商信息。"),             # 4 子问题2 第2轮
+        _text("总体总结。"),                # 5 汇总
+        _tool_calls([_save_call('{"report": "r", "title": "t"}')]),  # 6 报告
+    ])
+
+    summary_calls = []
+
+    def _fake_summarize_sub_question(sq_desc, messages, client, verbose=True, out=None):
+        summary_calls.append(sq_desc)
+        return "摘要"
+
+    monkeypatch.setattr("agent.agents.get_llm_client", lambda **kw: client)
+    monkeypatch.setattr("agent.agents.save_report_tool", lambda **kw: "已保存")
+    monkeypatch.setattr("agent.agents._estimate_tokens", lambda msgs: 100000)  # 强制超预算
+    monkeypatch.setattr("agent.agents._summarize_sub_question", _fake_summarize_sub_question)
+
+    result = deep_research("AI芯片市场", max_turns=12, force_report_at=8, verbose=False)
+
+    assert result == "报告已成功生成并保存。"
+    assert len(summary_calls) == 2      # 两个子问题各触发一次压缩
+    assert client.remaining == 0        # 全部脚本响应被消费，无多余调用

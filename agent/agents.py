@@ -73,12 +73,17 @@ def _build_tool_schemas() -> list[dict]:
 
 
 def _build_tool_map() -> dict:
-    """构建 tool_name → tool_function 的映射表。"""
+    """
+    构建 tool_name → tool_function 的映射表。
+
+    注意：通过模块全局按名解析函数（而非 registry 在导入时捕获的引用），
+    使测试中 monkeypatch 工具函数能够生效；生产环境无 monkeypatch 时行为不变。
+    """
     tool_map = {}
     for func, schema_fn in _TOOL_REGISTRY:
         schema = schema_fn()
         name = schema["function"]["name"]
-        tool_map[name] = func
+        tool_map[name] = globals()[func.__name__]
     return tool_map
 
 
@@ -389,6 +394,19 @@ def _estimate_tokens(messages: list[dict]) -> int:
     return int(total_chars / 2.5)
 
 
+def _context_over_budget(messages: list[dict]) -> bool:
+    """
+    判断当前上下文是否超过预算阈值（用于触发渐进式摘要）。
+
+    参数:
+        messages: 对话历史列表
+
+    返回:
+        bool: 估算 token 数超过 _CONTEXT_WINDOW × _BUDGET_RATIO 时返回 True
+    """
+    return _estimate_tokens(messages) > _CONTEXT_WINDOW * _BUDGET_RATIO
+
+
 def _build_research_notes(notes: list[dict], topic: str) -> str:
     """
     将累积的子问题摘要格式化为一条「研究笔记」消息。
@@ -550,6 +568,7 @@ def deep_research(
     depth: str = "standard",
     cancel_event: threading.Event = None,
     out=None,
+    output_dir: str = None,
 ) -> str:
     """
     执行深度研究并返回结果摘要。
@@ -566,6 +585,7 @@ def deep_research(
         force_report_at: 在此轮数后开始建议 LLM 进入撰写阶段，默认 8
         verbose:         是否实时打印每个 tool call 和 LLM 响应
         cancel_event:   可选的取消标志；置位时在检查点抛 ResearchCancelled
+        output_dir:     报告保存目录；None 时由 save_report_tool 用默认 reports/
 
     返回:
         str: 研究完成的最终状态描述
@@ -575,6 +595,14 @@ def deep_research(
 
     tool_schemas = _build_tool_schemas()
     tool_map = _build_tool_map()
+
+    # 若 CLI 指定了 --output，强制 save_report_tool 写入该目录，
+    # 覆盖 LLM 可能传入的 output_dir 参数（工具提示词默认不传）。
+    if output_dir:
+        def _save_report(report, title, **kwargs):
+            return save_report_tool(report, title, output_dir=output_dir)
+        tool_map["save_report_tool"] = _save_report
+
     tool_names = list(tool_map.keys())
 
     # 拼接完整系统提示词：角色/流程 + 工具使用策略
@@ -656,7 +684,9 @@ def deep_research(
     # messages[0 .. preamble_end_index] 永久保留，之后的内容可被裁剪
     preamble_end_index = len(messages) - 1
 
-    # 是否启用渐进式摘要（子问题数超阈值 或 后续可能接近上下文窗口）
+    # 是否启用渐进式摘要：
+    #   静态预判 — 子问题数超阈值（> _SUMMARIZE_THRESHOLD）时提前启用；
+    #   动态兜底 — 运行中上下文超过预算（_BUDGET_RATIO × _CONTEXT_WINDOW）时置 True。
     should_summarize = (
         len(sub_questions) > _SUMMARIZE_THRESHOLD
     )
@@ -692,6 +722,22 @@ def deep_research(
             if verbose:
                 print(f"  ⚠️ 已达最大轮数 {max_turns}，跳过剩余子问题", file=out)
             break
+
+        # ── 动态触发渐进式摘要（上下文超预算时）──
+        # 子问题数未超阈值、但已累积上下文超过预算（70% × 64K）时，
+        # 开启压缩，避免后续子问题把上下文撑爆。
+        if not should_summarize and _context_over_budget(messages):
+            should_summarize = True
+            # 剩余每个子问题将多花 1 轮总结，补足轮数余量
+            max_turns += len(sub_questions) - sq_index
+            if verbose:
+                print(
+                    f"  📋 上下文已达 {_estimate_tokens(messages)} tokens，"
+                    f"超过预算 {int(_CONTEXT_WINDOW * _BUDGET_RATIO)}"
+                    f"（{int(_BUDGET_RATIO * 100)}% × {_CONTEXT_WINDOW}），"
+                    f"启用渐进式摘要",
+                    file=out,
+                )
 
         # ── 打印子问题标题 ──
         if verbose:
